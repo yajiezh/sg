@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Ultra-Fast Fruit Ninja - Motion Controlled</title>
+    <style>
+        :root {
+            --primary: #ff4757;
+            --secondary: #2ed573;
+            --dark: #1e272e;
+            --ui-bg: rgba(0, 0, 0, 0.7);
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: var(--dark);
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            color: white;
+            user-select: none;
+            touch-action: none;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* Video is hidden, we process it in memory */
+        #webcam {
+            display: none; 
+        }
+
+        /* The main game canvas */
+        #game-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* Debug/Heatmap canvas */
+        #debug-canvas {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 160px;
+            height: 120px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            z-index: 2;
+            display: none; /* Toggled via UI */
+            background: black;
+            transform: scaleX(-1); /* Mirror debug view */
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none; /* Let clicks pass through if needed */
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .hud-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+        }
+
+        .score-box {
+            color: #ffa502;
+        }
+
+        .lives-box {
+            color: #ff4757;
+        }
+
+        .debug-info {
+            font-size: 12px;
+            font-family: monospace;
+            color: #00d2d3;
+            text-align: right;
+            margin-top: 5px;
+        }
+
+        /* Screens */
+        .screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 20;
+            pointer-events: auto;
+            transition: opacity 0.3s;
+        }
+
+        .hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        h1 {
+            font-size: 4rem;
+            margin: 0 0 20px 0;
+            background: linear-gradient(45deg, #ff9f43, #ff4757);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            text-shadow: 0 4px 10px rgba(255, 71, 87, 0.3);
+        }
+
+        p {
+            font-size: 1.2rem;
+            max-width: 600px;
+            text-align: center;
+            line-height: 1.6;
+            color: #ccc;
+        }
+
+        button {
+            background: linear-gradient(to right, #2ed573, #7bed9f);
+            border: none;
+            padding: 15px 40px;
+            font-size: 1.5rem;
+            color: #1e272e;
+            font-weight: bold;
+            border-radius: 50px;
+            cursor: pointer;
+            margin-top: 30px;
+            box-shadow: 0 4px 15px rgba(46, 213, 115, 0.4);
+            transition: transform 0.1s, box-shadow 0.1s;
+        }
+
+        button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 6px 20px rgba(46, 213, 115, 0.6);
+        }
+
+        button:active {
+            transform: scale(0.95);
+        }
+
+        .calibration-ring {
+            width: 100px;
+            height: 100px;
+            border: 5px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #2ed573;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .settings-panel {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.6);
+            padding: 15px;
+            border-radius: 10px;
+            pointer-events: auto;
+            z-index: 15;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .setting-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 14px;
+        }
+
+        input[type="range"] {
+            width: 100px;
+        }
+        
+        .toast {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 3rem;
+            font-weight: 900;
+            color: white;
+            text-shadow: 0 0 20px rgba(255,255,255,0.5);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 5;
+        }
+
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <video id="webcam" playsinline autoplay muted></video>
+    <canvas id="game-canvas"></canvas>
+    <canvas id="debug-canvas"></canvas>
+
+    <div id="ui-layer">
+        <div class="hud-top">
+            <div class="score-box">SCORE: <span id="score-val">0</span></div>
+            <div class="lives-box">LIVES: <span id="lives-val">3</span></div>
+        </div>
+        <div class="debug-info">
+            FPS: <span id="fps-val">0</span> | Latency: <span id="lat-val">0</span>ms<br>
+            Motion: <span id="motion-val">0</span>%
+        </div>
+        <div class="settings-panel">
+            <div class="setting-row">
+                <label>Show Heatmap</label>
+                <input type="checkbox" id="toggle-debug">
+            </div>
+            <div class="setting-row">
+                <label>Sensitivity</label>
+                <input type="range" id="sens-slider" min="1" max="5" step="0.1" value="2.5">
+            </div>
+        </div>
+    </div>
+    
+    <div id="toast" class="toast">COMBO!</div>
+
+    <!-- Start Screen -->
+    <div id="start-screen" class="screen">
+        <h1>Ninja Motion</h1>
+        <p>Use your hands to slice fruits. Avoid the bombs!<br>
+        Stand back so the camera sees your upper body.<br>
+        Ensure good lighting for best performance.</p>
+        <button id="btn-start">START GAME</button>
+    </div>
+
+    <!-- Calibration Screen -->
+    <div id="calibration-screen" class="screen hidden">
+        <div class="calibration-ring"></div>
+        <h2>Calibrating...</h2>
+        <p>Wave your hands widely across the screen!</p>
+        <div style="width: 200px; height: 10px; background: #333; margin-top: 20px; border-radius: 5px; overflow: hidden;">
+            <div id="calib-progress" style="width: 0%; height: 100%; background: #2ed573; transition: width 0.1s;"></div>
+        </div>
+    </div>
+
+    <!-- Game Over Screen -->
+    <div id="game-over-screen" class="screen hidden">
+        <h1 style="color: #ff4757;">GAME OVER</h1>
+        <p>Final Score: <span id="final-score" style="color: white; font-weight: bold; font-size: 2rem;">0</span></p>
+        <button id="btn-restart">PLAY AGAIN</button>
+    </div>
+</div>
+
+<script>
+/**
+ * CONFIGURATION & CONSTANTS
+ */
+const CONFIG = {
+    // Motion Detection
+    procWidth: 128,          // Low res buffer for fast processing
+    procHeight: 96,
+    threshold: 18,           // Pixel difference threshold (0-255)
+    sampleStep: 2,           // Skip pixels for speed (1 = check all, 2 = check every 2nd)
+    smoothing: 0.65,         // 0.0 = no smoothing, 1.0 = no movement
+    amplification: 2.5,      // Multiply movement to cover screen
+    minMotionPixels: 20,     // Minimum changed pixels to register motion
+    
+    // Game Mechanics
+    gravity: 0.15,
+    fruitSpeedMin: 8,
+    fruitSpeedMax: 14,
+    spawnRateBase: 60,       // Frames between spawns
+    trailLength: 15,
+    trailWidth: 12,
+    sliceVelocityThreshold: 5, // Min speed to cut
+    
+    // Visuals
+    colors: {
+        trail: '#00d2d3',
+        trailHot: '#ff9f43',
+        bomb: '#2f3542'
+    }
+};
+
+/**
+ * GLOBAL STATE
+ */
+const state = {
+    screen: 'start', // start, calibrate, game, gameover
+    score: 0,
+    lives: 3,
+    width: window.innerWidth,
+    height: window.innerHeight,
+    frames: 0,
+    lastTime: 0,
+    fps: 0,
+    processingTime: 0
+};
+
+// DOM Elements
+const video = document.getElementById('webcam');
+const gameCanvas = document.getElementById('game-canvas');
+const gameCtx = gameCanvas.getContext('2d', { alpha: true, desynchronized: true });
+const debugCanvas = document.getElementById('debug-canvas');
+const debugCtx = debugCanvas.getContext('2d', { alpha: false });
+
+// UI Elements
+const uiScore = document.getElementById('score-val');
+const uiLives = document.getElementById('lives-val');
+const uiFps = document.getElementById('fps-val');
+const uiLat = document.getElementById('lat-val');
+const uiMotion = document.getElementById('motion-val');
+const uiToast = document.getElementById('toast');
+
+// Offscreen Processing Buffers
+const procCanvas = document.createElement('canvas');
+procCanvas.width = CONFIG.procWidth;
+procCanvas.height = CONFIG.procHeight;
+const procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
+
+// Previous frame buffer for motion detection
+let prevFrameData = null;
+
+// Game Objects
+const fruits = [];
+const particles = [];
+const trail = []; // Array of {x, y, age}
+
+// Audio Context (Synthesized sounds to avoid external files)
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+const audioCtx = new AudioContext();
+
+function playSound(type) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    const now = audioCtx.currentTime;
+    if (type === 'slice') {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(800, now);
+        osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        osc.start(now);
+        osc.stop(now + 0.1);
+    } else if (type === 'bomb') {
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(100, now);
+        osc.frequency.exponentialRampToValueAtTime(10, now + 0.5);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+        osc.start(now);
+        osc.stop(now + 0.5);
+    } else if (type === 'spawn') {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(400, now);
+        osc.frequency.linearRampToValueAtTime(600, now + 0.1);
+        gain.gain.setValueAtTime(0.05, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.1);
+        osc.start(now);
+        osc.stop(now + 0.1);
+    }
+}
+
+/**
+ * MOTION DETECTION ENGINE
+ */
+const motion = {
+    x: state.width / 2,
+    y: state.height / 2,
+    vx: 0,
+    vy: 0,
+    active: false,
+    intensity: 0
+};
+
+function processVideoFrame() {
+    const t0 = performance.now();
+
+    // 1. Draw video to small buffer
+    // Save aspect ratio, draw centered
+    procCtx.drawImage(video, 0, 0, CONFIG.procWidth, CONFIG.procHeight);
+    
+    // 2. Get pixel data
+    const imageData = procCtx.getImageData(0, 0, CONFIG.procWidth, CONFIG.procHeight);
+    const data = new Uint32Array(imageData.data.buffer); // 32-bit view for speed
+    const len = data.length;
+
+    // 3. Initialize previous frame if needed
+    if (!prevFrameData) {
+        prevFrameData = new Uint32Array(len);
+        prevFrameData.set(data);
+        return;
+    }
+
+    let sumX = 0;
+    let sumY = 0;
+    let count = 0;
+    
+    // 4. Loop pixels (Optimized)
+    // We iterate with a step to reduce CPU load
+    for (let i = 0; i < len; i += CONFIG.sampleStep) {
+        const curr = data[i];
+        const prev = prevFrameData[i];
+        
+        // Fast bitwise difference check
+        // Check if pixels are exactly same first (very fast)
+        if (curr === prev) continue;
+
+        // Extract RGB (Little Endian: ABGR or BGRA depending on system, but diff works regardless)
+        const r1 = curr & 0xFF;
+        const g1 = (curr >> 8) & 0xFF;
+        const b1 = (curr >> 16) & 0xFF;
+
+        const r2 = prev & 0xFF;
+        const g2 = (prev >> 8) & 0xFF;
+        const b2 = (prev >> 16) & 0xFF;
+
+        // Manhattan distance approximation is faster than Euclidean
+        const diff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
+
+        if (diff > CONFIG.threshold * 3) { // *3 because we summed 3 channels
+            const x = i % CONFIG.procWidth;
+            const y = Math.floor(i / CONFIG.procWidth);
+            
+            sumX += x;
+            sumY += y;
+            count++;
+            
+            // Debug visualization (Green pixel on change)
+            if (isDebugVisible) {
+                // Set alpha to full, color to green for debug
+                // This modifies the array we just read, which is fine for debug view
+                data[i] = 0xFF00FF00; 
+            }
+        }
+    }
+
+    // 5. Update Motion State
+    if (count > CONFIG.minMotionPixels) {
+        // Calculate centroid
+        let avgX = sumX / count;
+        let avgY = sumY / count;
+
+        // Normalize to 0-1 (Mirror X because it's a webcam)
+        let normX = 1 - (avgX / CONFIG.procWidth); 
+        let normY = avgY / CONFIG.procHeight;
+
+        // Amplify / Center expansion
+        // Shift origin to center (0.5), scale, shift back
+        normX = (normX - 0.5) * CONFIG.amplification + 0.5;
+        normY = (normY - 0.5) * CONFIG.amplification + 0.5;
+
+        // Clamp
+        normX = Math.max(0, Math.min(1, normX));
+        normY = Math.max(0, Math.min(1, normY));
+
+        // Map to screen space
+        const targetX = normX * state.width;
+        const targetY = normY * state.height;
+
+        // Smooth movement
+        motion.vx = targetX - motion.x;
+        motion.vy = targetY - motion.y;
+        
+        motion.x += motion.vx * (1 - CONFIG.smoothing);
+        motion.y += motion.vy * (1 - CONFIG.smoothing);
+        
+        motion.active = true;
+        motion.intensity = Math.min(100, count / 5);
+    } else {
+        motion.active = false;
+        motion.intensity = Math.max(0, motion.intensity - 5);
+    }
+
+    // Update previous frame
+    prevFrameData.set(data); // Copy current to prev
+
+    // Debug Render
+    if (isDebugVisible) {
+        debugCtx.putImageData(imageData, 0, 0);
+        // Draw centroid
+        if (motion.active) {
+            debugCtx.fillStyle = 'red';
+            debugCtx.beginPath();
+            // Map screen coords back to debug canvas coords (mirrored)
+            const dx = (1 - (motion.x / state.width)) * CONFIG.procWidth;
+            const dy = (motion.y / state.height) * CONFIG.procHeight;
+            debugCtx.arc(dx, dy, 5, 0, Math.PI*2);
+            debugCtx.fill();
+        }
+    }
+
+    // Performance tracking
+    const t1 = performance.now();
+    state.processingTime = t1 - t0;
+}
+
+/**
+ * GAME ENTITIES
+ */
+
+const FRUIT_TYPES = ['🍎', '🍌', '🍉', '🍍', '🥝', '🍊'];
+const BOMB_TYPE = '💣';
+
+class Fruit {
+    constructor() {
+        this.reset();
+    }
+
+    reset() {
+        this.active = true;
+        this.radius = 40; // Hitbox radius
+        this.x = Math.random() * (state.width - 100) + 50;
+        this.y = state.height + 50;
+        
+        // Velocity: Throw upwards and slightly towards center
+        const centerX = state.width / 2;
+        const dirX = (centerX - this.x) * 0.005 + (Math.random() - 0.5) * 4;
+        
+        this.vx = dirX;
+        this.vy = -(Math.random() * (CONFIG.fruitSpeedMax - CONFIG.fruitSpeedMin) + CONFIG.fruitSpeedMin);
+        
+        this.rotation = 0;
+        this.rotSpeed = (Math.random() - 0.5) * 0.2;
+        
+        // 10% chance of bomb
+        this.isBomb = Math.random() < 0.15;
+        this.emoji = this.isBomb ? BOMB_TYPE : FRUIT_TYPES[Math.floor(Math.random() * FRUIT_TYPES.length)];
+        
+        this.sliced = false;
+        this.scale = 1;
+        this.opacity = 1;
+    }
+
+    update() {
+        if (!this.active) return;
+
+        // Physics
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += CONFIG.gravity;
+        this.rotation += this.rotSpeed;
+
+        // Boundary check
+        if (this.y > state.height + 60) {
+            this.active = false;
+            // If it was a fruit and wasn't sliced, lose a life
+            if (!this.isBomb && !this.sliced && state.screen === 'game') {
+                loseLife();
+            }
+        }
+    }
+
+    draw(ctx) {
+        if (!this.active) return;
+        
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.rotation);
+        ctx.scale(this.scale, this.scale);
+        ctx.globalAlpha = this.opacity;
+        
+        ctx.font = "60px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        
+        // Shadow for depth
+        ctx.shadowColor = "rgba(0,0,0,0.5)";
+        ctx.shadowBlur = 10;
+        ctx.fillText(this.emoji, 0, 5); // Offset slightly for baseline
+        
+        ctx.restore();
+
+        // Debug Hitbox
+        // ctx.strokeStyle = 'red';
+        // ctx.beginPath();
+        // ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2);
+        // ctx.stroke();
+    }
+
+    slice() {
+        if (this.sliced) return;
+        this.sliced = true;
+        this.active = false; // Hide original
+
+        if (this.isBomb) {
+            triggerBomb();
+        } else {
+            playSound('slice');
+            addScore(10);
+            createParticles(this.x, this.y, this.emoji);
+            createSliceEffect(this.x, this.y, this.vx, this.vy, this.emoji);
+        }
+    }
+}
+
+class Particle {
+    constructor() {
+        this.active = false;
+    }
+    
+    spawn(x, y, color) {
+        this.x = x;
+        this.y = y;
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 5 + 2;
+        this.vx = Math.cos(angle) * speed;
+        this.vy = Math.sin(angle) * speed;
+        this.life = 1.0;
+        this.decay = Math.random() * 0.03 + 0.02;
+        this.color = color;
+        this.size = Math.random() * 5 + 2;
+        this.active = true;
+    }
+
+    update() {
+        if (!this.active) return;
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += 0.2; // Gravity
+        this.life -= this.decay;
+        if (this.life <= 0) this.active = false;
+    }
+
+    draw(ctx) {
+        if (!this.active) return;
+        ctx.globalAlpha = this.life;
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+}
+
+// Simple object pooling
+const fruitPool = Array(20).fill(null).map(() => new Fruit());
+const particlePool = Array(100).fill(null).map(() => new Particle());
+
+function spawnFruit() {
+    const fruit = fruitPool.find(f => !f.active);
+    if (fruit) {
+        fruit.reset();
+        playSound('spawn');
+    }
+}
+
+function createParticles(x, y, emoji) {
+    // Extract a dominant color based on fruit (simple mapping)
+    let color = '#fff';
+    if (emoji === '🍎' || emoji === '🍉') color = '#ff4757';
+    else if (emoji === '🍌' || emoji === '🍍') color = '#ffa502';
+    else if (emoji === '🥝') color = '#2ed573';
+    
+    for (let i = 0; i < 10; i++) {
+        const p = particlePool.find(p => !p.active);
+        if (p) p.spawn(x, y, color);
+    }
+}
+
+// Visual effect for sliced fruit halves
+const slicedParts = [];
+function createSliceEffect(x, y, vx, vy, emoji) {
+    slicedParts.push({
+        x: x, y: y, vx: vx - 2, vy: vy, rot: -0.1, emoji: emoji, side: -1, life: 1
+    });
+    slicedParts.push({
+        x: x, y: y, vx: vx + 2, vy: vy, rot: 0.1, emoji: emoji, side: 1, life: 1
+    });
+}
+
+/**
+ * GAME LOGIC
+ */
+
+function addScore(points) {
+    state.score += points;
+    uiScore.innerText = state.score;
+    // Difficulty ramp
+    if (state.score % 50 === 0) {
+        CONFIG.spawnRateBase = Math.max(20, CONFIG.spawnRateBase - 5);
+    }
+}
+
+function loseLife() {
+    state.lives--;
+    uiLives.innerText = state.lives;
+    if (state.lives <= 0) {
+        gameOver();
+    }
+}
+
+function triggerBomb() {
+    playSound('bomb');
+    state.lives = 0;
+    uiLives.innerText = 0;
+    // Flash screen white
+    const flash = document.createElement('div');
+    flash.style.position = 'absolute';
+    flash.style.top = '0';
+    flash.style.left = '0';
+    flash.style.width = '100%';
+    flash.style.height = '100%';
+    flash.style.background = 'white';
+    flash.style.zIndex = '100';
+    document.body.appendChild(flash);
+    setTimeout(() => flash.remove(), 100);
+    gameOver();
+}
+
+function gameOver() {
+    state.screen = 'gameover';
+    document.getElementById('final-score').innerText = state.score;
+    document.getElementById('game-over-screen').classList.remove('hidden');
+}
+
+function resetGame() {
+    state.score = 0;
+    state.lives = 3;
+    state.screen = 'game';
+    CONFIG.spawnRateBase = 60;
+    
+    uiScore.innerText = '0';
+    uiLives.innerText = '3';
+    
+    fruits.forEach(f => f.active = false);
+    slicedParts.length = 0;
+    
+    document.getElementById('start-screen').classList.add('hidden');
+    document.getElementById('game-over-screen').classList.add('hidden');
+    document.getElementById('calibration-screen').classList.add('hidden');
+}
+
+function startCalibration() {
+    state.screen = 'calibrate';
+    document.getElementById('start-screen').classList.add('hidden');
+    document.getElementById('calibration-screen').classList.remove('hidden');
+    
+    let calibProgress = 0;
+    const bar = document.getElementById('calib-progress');
+    
+    const calibInterval = setInterval(() => {
+        if (state.screen !== 'calibrate') {
+            clearInterval(calibInterval);
+            return;
+        }
+        
+        if (motion.active) {
+            calibProgress += 2;
+        }
+        bar.style.width = calibProgress + '%';
+        
+        if (calibProgress >= 100) {
+            clearInterval(calibInterval);
+            resetGame();
+        }
+    }, 50);
+}
+
+/**
+ * RENDER LOOP
+ */
+let spawnTimer = 0;
+let isDebugVisible = false;
+
+function loop() {
+    requestAnimationFrame(loop);
+
+    // 1. Process Input
+    if (video.readyState === 4) {
+        processVideoFrame();
+    }
+
+    // Update UI Stats
+    uiLat.innerText = state.processingTime.toFixed(1);
+    uiMotion.innerText = motion.intensity.toFixed(0);
+    
+    const now = performance.now();
+    if (now - state.lastTime >= 1000) {
+        uiFps.innerText = state.frames;
+        state.frames = 0;
+        state.lastTime = now;
+    }
+    state.frames++;
+
+    // Clear Canvas
+    gameCtx.clearRect(0, 0, state.width, state.height);
+
+    // 2. Update Trail
+    if (motion.active) {
+        trail.push({ x: motion.x, y: motion.y, age: CONFIG.trailLength });
+    }
+    
+    // Fade trail
+    for (let i = trail.length - 1; i >= 0; i--) {
+        trail[i].age--;
+        if (trail[i].age <= 0) trail.splice(i, 1);
+    }
+
+    // Draw Trail
+    if (trail.length > 1) {
+        gameCtx.beginPath();
+        gameCtx.moveTo(trail[0].x, trail[0].y);
+        
+        // Quadratic Bezier for smoothness
+        for (let i = 1; i < trail.length - 1; i++) {
+            const xc = (trail[i].x + trail[i+1].x) / 2;
+            const yc = (trail[i].y + trail[i+1].y) / 2;
+            gameCtx.quadraticCurveTo(trail[i].x, trail[i].y, xc, yc);
+        }
+        
+        // Dynamic styling based on speed
+        const speed = Math.abs(motion.vx) + Math.abs(motion.vy);
+        const isFast = speed > CONFIG.sliceVelocityThreshold;
+        
+        gameCtx.lineCap = 'round';
+        gameCtx.lineJoin = 'round';
+        gameCtx.lineWidth = CONFIG.trailWidth;
+        gameCtx.strokeStyle = isFast ? CONFIG.colors.trailHot : CONFIG.colors.trail;
+        gameCtx.shadowBlur = 20;
+        gameCtx.shadowColor = gameCtx.strokeStyle;
+        gameCtx.stroke();
+        gameCtx.shadowBlur = 0; // Reset
+    }
+
+    // 3. Game Logic (Only if playing)
+    if (state.screen === 'game') {
+        spawnTimer++;
+        if (spawnTimer > CONFIG.spawnRateBase) {
+            spawnFruit();
+            spawnTimer = 0;
+        }
+
+        // Check Collisions
+        // We check if any point in the recent trail intersects a fruit
+        // Only if moving fast enough
+        const speed = Math.abs(motion.vx) + Math.abs(motion.vy);
+        if (speed > CONFIG.sliceVelocityThreshold && trail.length > 2) {
+            fruitPool.forEach(fruit => {
+                if (fruit.active && !fruit.sliced) {
+                    // Check distance to last few trail points
+                    for (let i = trail.length - 1; i > Math.max(0, trail.length - 5); i--) {
+                        const dx = trail[i].x - fruit.x;
+                        const dy = trail[i].y - fruit.y;
+                        const dist = Math.sqrt(dx*dx + dy*dy);
+                        if (dist < fruit.radius + 10) {
+                            fruit.slice();
+                            break; // Sliced this fruit, move to next
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    // 4. Update & Draw Entities
+    
+    // Fruits
+    fruitPool.forEach(f => {
+        f.update();
+        f.draw(gameCtx);
+    });
+
+    // Sliced Parts
+    for (let i = slicedParts.length - 1; i >= 0; i--) {
+        const p = slicedParts[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += CONFIG.gravity;
+        p.life -= 0.02;
+        
+        if (p.life <= 0) {
+            slicedParts.splice(i, 1);
+            continue;
+        }
+
+        gameCtx.save();
+        gameCtx.translate(p.x, p.y);
+        gameCtx.rotate(p.rot * (1/p.life)); // Spin faster as it falls?
+        gameCtx.globalAlpha = p.life;
+        gameCtx.font = "60px Arial";
+        gameCtx.textAlign = "center";
+        gameCtx.textBaseline = "middle";
+        
+        // Clip half the emoji
+        gameCtx.beginPath();
+        if (p.side === -1) gameCtx.rect(-30, -30, 30, 60); // Left half
+        else gameCtx.rect(0, -30, 30, 60); // Right half
+        gameCtx.clip();
+        
+        gameCtx.fillText(p.emoji, 0, 0);
+        gameCtx.restore();
+    }
+
+    // Particles
+    particlePool.forEach(p => {
+        p.update();
+        p.draw(gameCtx);
+    });
+}
+
+/**
+ * INITIALIZATION
+ */
+
+async function initWebcam() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                frameRate: { ideal: 60 }
+            },
+            audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+    } catch (err) {
+        alert("Camera access denied or error. Please allow camera access to play.");
+        console.error(err);
+    }
+}
+
+// Event Listeners
+document.getElementById('btn-start').addEventListener('click', () => {
+    initWebcam().then(() => {
+        startCalibration();
+    });
+});
+
+document.getElementById('btn-restart').addEventListener('click', () => {
+    resetGame();
+});
+
+document.getElementById('toggle-debug').addEventListener('change', (e) => {
+    isDebugVisible = e.target.checked;
+    debugCanvas.style.display = isDebugVisible ? 'block' : 'none';
+});
+
+document.getElementById('sens-slider').addEventListener('input', (e) => {
+    CONFIG.amplification = parseFloat(e.target.value);
+});
+
+// Resize handler
+window.addEventListener('resize', () => {
+    state.width = window.innerWidth;
+    state.height = window.innerHeight;
+    gameCanvas.width = state.width;
+    gameCanvas.height = state.height;
+});
+
+// Init Canvas Size
+state.width = window.innerWidth;
+state.height = window.innerHeight;
+gameCanvas.width = state.width;
+gameCanvas.height = state.height;
+
+// Start Loop
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
