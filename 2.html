@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Motion Ninja - Webcam Slicer</title>
+    <style>
+        :root {
+            --primary: #ff4757;
+            --secondary: #2ed573;
+            --dark: #1e272e;
+            --light: #f1f2f6;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: var(--dark);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* The main game canvas */
+        canvas#game-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 2;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Hidden video element for processing */
+        video#webcam {
+            display: none;
+            /* We process this in JS, no need to show raw feed unless debugging */
+        }
+
+        /* UI Overlay */
+        #ui-layer {
+            position: absolute;
+            z-index: 10;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Let clicks pass through to canvas if needed */
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .hud {
+            display: flex;
+            justify-content: space-between;
+            font-size: 2rem;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            font-weight: bold;
+        }
+
+        #score-display span { color: var(--secondary); }
+        #timer-display span { color: var(--primary); }
+
+        /* Screens (Start, Game Over) */
+        .screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 20;
+            pointer-events: auto;
+            transition: opacity 0.3s;
+        }
+
+        .screen.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        h1 {
+            font-size: 5rem;
+            color: white;
+            margin: 0 0 20px 0;
+            text-transform: uppercase;
+            letter-spacing: 5px;
+            background: linear-gradient(45deg, #ff9f43, #ff4757);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0px 4px 15px rgba(255, 71, 87, 0.3);
+        }
+
+        p {
+            color: #ccc;
+            font-size: 1.5rem;
+            margin-bottom: 40px;
+            text-align: center;
+            max-width: 600px;
+            line-height: 1.5;
+        }
+
+        .btn {
+            padding: 15px 50px;
+            font-size: 2rem;
+            background: linear-gradient(to right, #2ed573, #1e90ff);
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            box-shadow: 0 10px 20px rgba(46, 213, 115, 0.3);
+            transition: transform 0.2s, box-shadow 0.2s;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 15px 30px rgba(46, 213, 115, 0.5);
+        }
+
+        .btn:active {
+            transform: scale(0.95);
+        }
+
+        #camera-status {
+            position: absolute;
+            bottom: 20px;
+            color: #777;
+            font-size: 0.9rem;
+        }
+
+        /* Motion Debug View (Small corner) */
+        #motion-debug {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            width: 160px;
+            height: 120px;
+            border: 2px solid rgba(255,255,255,0.2);
+            z-index: 5;
+            opacity: 0.7;
+            transform: scaleX(-1); /* Mirror debug view */
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="game-canvas"></canvas>
+    
+    <!-- Motion Processing Canvas (Offscreen) -->
+    <canvas id="motion-canvas" style="display: none;"></canvas>
+    <!-- Visual Debug of Motion -->
+    <canvas id="motion-debug"></canvas>
+
+    <div id="ui-layer">
+        <div class="hud">
+            <div id="score-display">SCORE: <span id="score">0</span></div>
+            <div id="timer-display">TIME: <span id="time">60</span></div>
+        </div>
+    </div>
+
+    <!-- Start Screen -->
+    <div id="start-screen" class="screen">
+        <h1>Motion Ninja</h1>
+        <p>Wave your hand vigorously to slice fruits!<br>Avoid the bombs.</p>
+        <button class="btn" id="start-btn">Start Game</button>
+        <div id="camera-status">Waiting for camera permission...</div>
+    </div>
+
+    <!-- Game Over Screen -->
+    <div id="game-over-screen" class="screen hidden">
+        <h1>Game Over</h1>
+        <p>Final Score: <span id="final-score" style="color:white; font-weight:bold;">0</span></p>
+        <button class="btn" id="restart-btn">Play Again</button>
+    </div>
+</div>
+
+<script>
+/**
+ * MOTION NINJA - Single File Implementation
+ * Uses pixel-difference motion detection for robust, model-free hand tracking.
+ */
+
+// --- Configuration ---
+const CONFIG = {
+    motionThreshold: 25,    // Pixel difference threshold (0-255) to count as motion
+    minMotionPixels: 50,    // Minimum number of changed pixels to register movement
+    smoothing: 0.2,         // Lerp factor for cursor movement (0.1 = slow/smooth, 1.0 = instant)
+    sliceLife: 10,          // How long trail points last
+    gravity: 0.15,          // Game gravity
+    spawnRate: 1000,        // ms between spawns (decreases over time)
+    gameDuration: 60        // seconds
+};
+
+// --- Global State ---
+const state = {
+    screen: 'start', // start, playing, gameover
+    score: 0,
+    timeLeft: CONFIG.gameDuration,
+    lastTime: 0,
+    spawnTimer: 0,
+    fruits: [],
+    particles: [],
+    sliceTrail: [],
+    mouse: { x: 0, y: 0 }, // Current smoothed position
+    rawMouse: { x: 0, y: 0 }, // Target position from motion
+    velocity: 0,
+    isSlicing: false,
+    combo: 0,
+    comboTimer: 0,
+    videoReady: false
+};
+
+// --- DOM Elements ---
+const video = document.getElementById('webcam');
+const canvas = document.getElementById('game-canvas');
+const ctx = canvas.getContext('2d');
+const motionCanvas = document.getElementById('motion-canvas');
+const motionCtx = motionCanvas.getContext('2d', { willReadFrequently: true });
+const debugCanvas = document.getElementById('motion-debug');
+const debugCtx = debugCanvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const timeEl = document.getElementById('time');
+const finalScoreEl = document.getElementById('final-score');
+const startScreen = document.getElementById('start-screen');
+const gameOverScreen = document.getElementById('game-over-screen');
+const statusEl = document.getElementById('camera-status');
+
+// --- Audio System (Synthesized) ---
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+function playSound(type) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    const now = audioCtx.currentTime;
+
+    if (type === 'slice') {
+        // High pitched swoosh
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(600, now);
+        osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        osc.start(now);
+        osc.stop(now + 0.1);
+    } else if (type === 'splat') {
+        // Squishy sound
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(200, now);
+        osc.frequency.linearRampToValueAtTime(50, now + 0.15);
+        gain.gain.setValueAtTime(0.5, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+        osc.start(now);
+        osc.stop(now + 0.15);
+    } else if (type === 'bomb') {
+        // Explosion
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(100, now);
+        osc.frequency.exponentialRampToValueAtTime(10, now + 0.5);
+        gain.gain.setValueAtTime(1, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+        osc.start(now);
+        osc.stop(now + 0.5);
+    }
+}
+
+// --- Resize Handler ---
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    // Motion processing resolution (low res for performance)
+    motionCanvas.width = 128; 
+    motionCanvas.height = 96;
+    debugCanvas.width = 128;
+    debugCanvas.height = 96;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Webcam Setup ---
+async function setupCamera() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                facingMode: 'user'
+            },
+            audio: false
+        });
+        video.srcObject = stream;
+        
+        return new Promise((resolve) => {
+            video.onloadedmetadata = () => {
+                video.play();
+                state.videoReady = true;
+                statusEl.innerText = "Camera Ready! Wave hand to test.";
+                resolve();
+            };
+        });
+    } catch (err) {
+        statusEl.innerText = "Error: Camera access denied. Please allow camera access.";
+        console.error("Camera Error:", err);
+        alert("Camera access is required to play. Please allow access and refresh.");
+    }
+}
+
+// --- Motion Detection Engine ---
+let prevFrameData = null;
+
+function detectMotion() {
+    if (!state.videoReady) return;
+
+    const w = motionCanvas.width;
+    const h = motionCanvas.height;
+
+    // Draw current video frame to small canvas
+    motionCtx.drawImage(video, 0, 0, w, h);
+    
+    // Get pixel data
+    const frameData = motionCtx.getImageData(0, 0, w, h);
+    const data = frameData.data; // RGBA array
+
+    // Debug view background
+    debugCtx.fillStyle = '#000';
+    debugCtx.fillRect(0, 0, w, h);
+
+    if (!prevFrameData) {
+        prevFrameData = data;
+        return;
+    }
+
+    let sumX = 0;
+    let sumY = 0;
+    let count = 0;
+
+    // Loop through pixels (step by 4 for RGBA)
+    // Optimization: check every 2nd pixel to speed up
+    for (let i = 0; i < data.length; i += 4 * 2) {
+        const r = data[i];
+        const g = data[i+1];
+        const b = data[i+2];
+
+        const pr = prevFrameData[i];
+        const pg = prevFrameData[i+1];
+        const pb = prevFrameData[i+2];
+
+        // Calculate difference
+        const diff = Math.abs(r - pr) + Math.abs(g - pg) + Math.abs(b - pb);
+
+        if (diff > CONFIG.motionThreshold) {
+            const index = i / 4;
+            const x = index % w;
+            const y = Math.floor(index / w);
+
+            sumX += x;
+            sumY += y;
+            count++;
+
+            // Draw on debug canvas
+            debugCtx.fillStyle = '#0f0';
+            debugCtx.fillRect(x, y, 1, 1);
+        }
+    }
+
+    prevFrameData = data;
+
+    // Calculate center of motion
+    if (count > CONFIG.minMotionPixels) {
+        const avgX = sumX / count;
+        const avgY = sumY / count;
+
+        // Map to screen coordinates
+        // Note: Mirror X for natural feel
+        const screenX = canvas.width - (avgX / w) * canvas.width;
+        const screenY = (avgY / h) * canvas.height;
+
+        state.rawMouse.x = screenX;
+        state.rawMouse.y = screenY;
+        
+        // Draw center on debug
+        debugCtx.fillStyle = 'red';
+        debugCtx.beginPath();
+        debugCtx.arc(avgX, avgY, 3, 0, Math.PI*2);
+        debugCtx.fill();
+    }
+}
+
+// --- Game Logic ---
+
+class Fruit {
+    constructor() {
+        this.type = Math.random() > 0.9 ? 'bomb' : 'fruit';
+        this.emoji = this.type === 'bomb' ? '💣' : ['🍎', '🍌', '🍉', '🍍', '🥥', '🍊'][Math.floor(Math.random() * 6)];
+        this.size = 60;
+        this.x = Math.random() * (canvas.width - 100) + 50;
+        this.y = canvas.height + 50;
+        
+        // Physics
+        // Throw towards center-ish
+        const centerX = canvas.width / 2;
+        const dirX = (centerX - this.x) * 0.002 + (Math.random() - 0.5) * 2;
+        
+        this.vx = dirX;
+        this.vy = -(Math.random() * 5 + 12); // Upward force
+        this.rotation = 0;
+        this.rotSpeed = (Math.random() - 0.5) * 0.2;
+        
+        this.active = true;
+        this.sliced = false;
+        
+        // Hitbox
+        this.radius = 30;
+    }
+
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += CONFIG.gravity;
+        this.rotation += this.rotSpeed;
+
+        // Deactivate if falls off screen
+        if (this.y > canvas.height + 100) {
+            this.active = false;
+            // Reset combo if fruit missed (optional, strict mode)
+            // if (this.type !== 'bomb' && !this.sliced) state.combo = 0;
+        }
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.rotation);
+        ctx.font = `${this.size}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(this.emoji, 0, 5); // Slight offset for emoji baseline
+        ctx.restore();
+
+        // Debug Hitbox
+        // ctx.beginPath();
+        // ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2);
+        // ctx.strokeStyle = 'red';
+        // ctx.stroke();
+    }
+}
+
+class Particle {
+    constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 10;
+        this.vy = (Math.random() - 0.5) * 10;
+        this.life = 1.0;
+        this.color = color;
+        this.size = Math.random() * 5 + 2;
+    }
+
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += CONFIG.gravity;
+        this.life -= 0.02;
+    }
+
+    draw(ctx) {
+        ctx.globalAlpha = this.life;
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+    }
+}
+
+function spawnFruit() {
+    state.fruits.push(new Fruit());
+}
+
+function createExplosion(x, y, type) {
+    const color = type === 'bomb' ? '#ff0000' : '#ffff00';
+    const count = type === 'bomb' ? 50 : 15;
+    
+    for (let i = 0; i < count; i++) {
+        state.particles.push(new Particle(x, y, color));
+    }
+    
+    if (type !== 'bomb') {
+        // Add juice splatter colors based on fruit (simplified)
+        for (let i = 0; i < 10; i++) {
+            state.particles.push(new Particle(x, y, `hsl(${Math.random()*360}, 70%, 50%)`));
+        }
+    }
+}
+
+// Line segment to Circle intersection
+function lineIntersectCircle(p1, p2, circle) {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    
+    if (len === 0) return false; // Points are same
+
+    const dot = ((circle.x - p1.x) * dx + (circle.y - p1.y) * dy) / (len * len);
+    
+    const closestX = p1.x + (dot * dx);
+    const closestY = p1.y + (dot * dy);
+    
+    // Check if closest point is on the segment
+    if (dot < 0 || dot > 1) return false; // Projection is outside segment
+
+    const distX = closestX - circle.x;
+    const distY = closestY - circle.y;
+    const dist = Math.sqrt(distX * distX + distY * distY);
+
+    return dist <= circle.radius;
+}
+
+function checkCollisions() {
+    // We need at least 2 points to form a line
+    if (state.sliceTrail.length < 2) return;
+
+    // Check the last segment of the trail
+    const p2 = state.sliceTrail[state.sliceTrail.length - 1];
+    const p1 = state.sliceTrail[state.sliceTrail.length - 2];
+
+    // Only slice if moving fast enough
+    if (state.velocity < 15) return;
+
+    state.fruits.forEach(fruit => {
+        if (fruit.active && !fruit.sliced) {
+            if (lineIntersectCircle(p1, p2, fruit)) {
+                // Collision!
+                fruit.sliced = true;
+                fruit.active = false; // Remove immediately for now, or split
+                
+                if (fruit.type === 'bomb') {
+                    playSound('bomb');
+                    createExplosion(fruit.x, fruit.y, 'bomb');
+                    endGame();
+                } else {
+                    playSound('splat');
+                    createExplosion(fruit.x, fruit.y, 'fruit');
+                    state.score += 10 + (state.combo * 2);
+                    state.combo++;
+                    state.comboTimer = 60; // Frames
+                    
+                    // Visual feedback text
+                    // (Could add floating text here)
+                }
+            }
+        }
+    });
+}
+
+function updateGame() {
+    // 1. Update Mouse/Motion Smoothing
+    const dx = state.rawMouse.x - state.mouse.x;
+    const dy = state.rawMouse.y - state.mouse.y;
+    state.mouse.x += dx * CONFIG.smoothing;
+    state.mouse.y += dy * CONFIG.smoothing;
+
+    // Calculate Velocity
+    state.velocity = Math.sqrt(dx*dx + dy*dy);
+
+    // 2. Update Trail
+    state.sliceTrail.push({ x: state.mouse.x, y: state.mouse.y });
+    if (state.sliceTrail.length > CONFIG.sliceLife) {
+        state.sliceTrail.shift();
+    }
+
+    // 3. Spawning
+    if (state.timeLeft > 0) {
+        state.spawnTimer--;
+        if (state.spawnTimer <= 0) {
+            spawnFruit();
+            // Ramp up difficulty
+            const difficultyMultiplier = 1 - (state.timeLeft / CONFIG.gameDuration); // 0 to 1
+            state.spawnTimer = 60 - (difficultyMultiplier * 40); // 60 frames down to 20
+        }
+    }
+
+    // 4. Update Entities
+    state.fruits.forEach(f => f.update());
+    state.fruits = state.fruits.filter(f => f.active);
+
+    state.particles.forEach(p => p.update());
+    state.particles = state.particles.filter(p => p.life > 0);
+
+    // 5. Collisions
+    checkCollisions();
+
+    // 6. Game Logic
+    if (state.comboTimer > 0) state.comboTimer--;
+    else state.combo = 0;
+
+    scoreEl.innerText = state.score;
+}
+
+function drawGame() {
+    // Clear Canvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Draw Background (Video feed optional, currently dark styled)
+    // To show video background, uncomment:
+    // ctx.save();
+    // ctx.scale(-1, 1);
+    // ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+    // ctx.restore();
+    // ctx.fillStyle = 'rgba(30, 39, 46, 0.8)'; // Dark overlay
+    // ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    // Draw Fruits
+    state.fruits.forEach(f => f.draw(ctx));
+
+    // Draw Particles
+    state.particles.forEach(p => p.draw(ctx));
+
+    // Draw Slice Trail
+    if (state.sliceTrail.length > 1) {
+        ctx.beginPath();
+        ctx.moveTo(state.sliceTrail[0].x, state.sliceTrail[0].y);
+        for (let i = 1; i < state.sliceTrail.length; i++) {
+            // Quadratic bezier for smoothness
+            const p0 = state.sliceTrail[i-1];
+            const p1 = state.sliceTrail[i];
+            ctx.lineTo(p1.x, p1.y);
+        }
+        
+        // Dynamic styling based on velocity
+        const glow = Math.min(state.velocity * 2, 30);
+        ctx.shadowBlur = glow;
+        ctx.shadowColor = state.velocity > 20 ? '#00eaff' : '#7efff5';
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = Math.min(state.velocity / 2, 8);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+        
+        ctx.shadowBlur = 0; // Reset
+    }
+
+    // Draw Cursor/Hand Position
+    ctx.beginPath();
+    ctx.arc(state.mouse.x, state.mouse.y, 10, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.fill();
+}
+
+function loop(timestamp) {
+    if (!state.lastTime) state.lastTime = timestamp;
+    const deltaTime = timestamp - state.lastTime;
+
+    // Detect Motion
+    detectMotion();
+
+    if (state.screen === 'playing') {
+        // Timer Logic
+        if (timestamp - state.lastTime >= 1000) { // Approx 1 sec
+            state.timeLeft--;
+            timeEl.innerText = state.timeLeft;
+            if (state.timeLeft <= 0) {
+                endGame();
+            }
+            state.lastTime = timestamp;
+        }
+        
+        updateGame();
+        drawGame();
+    } else {
+        // Just draw the trail/motion in menu for feedback
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // Update smoothing for menu interaction feel
+        const dx = state.rawMouse.x - state.mouse.x;
+        const dy = state.rawMouse.y - state.mouse.y;
+        state.mouse.x += dx * CONFIG.smoothing;
+        state.mouse.y += dy * CONFIG.smoothing;
+        
+        // Draw cursor
+        ctx.beginPath();
+        ctx.arc(state.mouse.x, state.mouse.y, 15, 0, Math.PI*2);
+        ctx.fillStyle = 'rgba(46, 213, 115, 0.5)';
+        ctx.fill();
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        
+        state.lastTime = timestamp;
+    }
+
+    requestAnimationFrame(loop);
+}
+
+// --- Game Control ---
+
+function startGame() {
+    if (!state.videoReady) {
+        alert("Please wait for camera to initialize.");
+        return;
+    }
+    
+    state.score = 0;
+    state.timeLeft = CONFIG.gameDuration;
+    state.fruits = [];
+    state.particles = [];
+    state.sliceTrail = [];
+    state.screen = 'playing';
+    
+    scoreEl.innerText = '0';
+    timeEl.innerText = CONFIG.gameDuration;
+    
+    startScreen.classList.add('hidden');
+    gameOverScreen.classList.add('hidden');
+    
+    playSound('slice'); // Audio feedback
+}
+
+function endGame() {
+    state.screen = 'gameover';
+    finalScoreEl.innerText = state.score;
+    gameOverScreen.classList.remove('hidden');
+}
+
+// --- Event Listeners ---
+
+document.getElementById('start-btn').addEventListener('click', startGame);
+document.getElementById('restart-btn').addEventListener('click', startGame);
+
+// Mouse fallback for debugging without camera
+canvas.addEventListener('mousemove', (e) => {
+    // Only override if camera is not providing strong signal or for testing
+    // state.rawMouse.x = e.clientX;
+    // state.rawMouse.y = e.clientY;
+});
+
+// Initialize
+setupCamera().then(() => {
+    requestAnimationFrame(loop);
+});
+
+</script>
+</body>
+</html>
