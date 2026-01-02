@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Motion-Controlled Mario</title>
+<style>
+  html,body{margin:0;height:100%;background:#222;color:#fff;font-family:Arial}
+  #cam{position:absolute;top:10px;right:10px;width:160px;height:120px;object-fit:cover;border:2px solid #0f0}
+  #cv{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border:2px solid #fff}
+  #info{position:absolute;left:10px;top:10px;font-size:14px}
+</style>
+</head>
+<body>
+<video id="cam" autoplay muted playsinline></video>
+<canvas id="cv"></canvas>
+<div id="info">请允许摄像头权限，左手←，右手→，双手↑跳跃</div>
+
+<!-- TensorFlow 全家桶 -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/posenet@2.2.2/dist/posenet.min.js"></script>
+
+<script>
+/*****************************************************************
+ *  0. 摄像头初始化
+ *****************************************************************/
+async function initCam(){
+  const v = document.getElementById('cam');
+  const stream = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+  v.srcObject = stream;
+  return new Promise(res=>v.onloadedmetadata=()=>res());
+}
+
+/*****************************************************************
+ *  1. PoseNet 动作捕捉
+ *****************************************************************/
+let net;
+async function initPoseNet(){
+  net = await posenet.load({  // 轻量版
+    architecture: 'MobileNetV1',
+    outputStride: 16,
+    inputResolution: {width:640,height:480},
+    multiplier: 0.75
+  });
+}
+let lastCmd = {left:false,right:false,jump:false};
+async function detectPose(){
+  const v = document.getElementById('cam');
+  const pose = await net.estimateSinglePose(v, {
+    flipHorizontal: true
+  });
+  const keypoints = pose.keypoints;
+  function getPart(name){ return keypoints.find(p=>p.part===name); }
+
+  const leftShoulder  = getPart('leftShoulder');
+  const rightShoulder = getPart('rightShoulder');
+  const leftWrist     = getPart('leftWrist');
+  const rightWrist    = getPart('rightWrist');
+
+  const confidence = 0.6;
+  const leftUp  = leftWrist.score  > confidence && leftWrist.position.y  < leftShoulder.position.y - 30;
+  const rightUp = rightWrist.score > confidence && rightWrist.position.y < rightShoulder.position.y - 30;
+
+  lastCmd.left  = leftUp  && !rightUp;
+  lastCmd.right = rightUp && !leftUp;
+  lastCmd.jump  = leftUp  && rightUp;
+}
+
+/*****************************************************************
+ *  2. 简易马里奥游戏
+ *****************************************************************/
+const canvas = document.getElementById('cv');
+const ctx = canvas.getContext('2d');
+canvas.width = 800;
+canvas.height = 400;
+const GRAVITY = 0.5;
+const JUMP_V  = -11;
+const SPEED   = 3;
+
+const mario = {
+  x: 120, y: 200, w: 24, h: 32,
+  vx: 0, vy: 0, onGround: false, alive: true
+};
+
+const keys = { left:false, right:false, jump:false };
+
+// 简单的砖块&敌人
+const blocks = [];
+const enemies = [];
+(function initLevel(){
+  // 地面
+  for(let x=0;x<canvas.width;x+=20) blocks.push({x:x,y:canvas.height-20,w:20,h:20,type:'ground'});
+  // 几块砖
+  [200,250,300].forEach(x=>blocks.push({x:x,y:250,w:40,h:20,type:'brick'}));
+  // 敌人
+  enemies.push({x:350,y:0,w:30,h:30,dead:false});
+})();
+
+function rectIntersect(a,b){
+  return a.x < b.x + b.w && a.x + a.w > b.x &&
+         a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function updateMario(){
+  // 输入
+  keys.left  = lastCmd.left;
+  keys.right = lastCmd.right;
+  if(keys.left)  mario.vx = -SPEED;
+  else if(keys.right) mario.vx = SPEED;
+  else mario.vx = 0;
+
+  if(lastCmd.jump && mario.onGround){
+    mario.vy = JUMP_V;
+    mario.onGround = false;
+  }
+
+  // 物理
+  mario.vy += GRAVITY;
+  mario.x += mario.vx;
+  mario.y += mario.vy;
+
+  // 碰撞
+  mario.onGround = false;
+  for(const b of blocks){
+    if(rectIntersect(mario,b)){
+      // 从上方撞击
+      if(mario.vy>0 && mario.y < b.y){
+        mario.y = b.y - mario.h;
+        mario.vy = 0;
+        mario.onGround = true;
+      }
+    }
+  }
+
+  // 敌人
+  for(const e of enemies){
+    if(!e.dead && rectIntersect(mario,e)){
+      if(mario.vy>0 && mario.y < e.y - e.h/2){
+        // 踩敌人
+        e.dead = true;
+        mario.vy = JUMP_V*0.7;
+      }else{
+        mario.alive = false;
+      }
+    }
+  }
+
+  // 边界
+  if(mario.y>canvas.height) mario.alive=false;
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  // 背景
+  ctx.fillStyle='#5C94FC'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  // 砖块
+  blocks.forEach(b=>{
+    ctx.fillStyle= b.type==='ground' ? '#8B4513' : '#D2691E';
+    ctx.fillRect(b.x,b.y,b.w,b.h);
+  });
+  // 敌人
+  enemies.forEach(e=>{
+    if(!e.dead){ ctx.fillStyle='#000'; ctx.fillRect(e.x,e.y,e.w,e.h); }
+  });
+  // Mario
+  ctx.fillStyle = mario.alive ? '#FF0000' : '#888';
+  ctx.fillRect(mario.x,mario.y,mario.w,mario.h);
+  if(!mario.alive){
+    ctx.fillStyle='#fff';
+    ctx.font='24px Arial';
+    ctx.fillText('Game Over – 刷新页面重试',canvas.width/2-150,canvas.height/2);
+  }
+}
+
+/*****************************************************************
+ *  3. 主循环
+ *****************************************************************/
+async function gameLoop(){
+  if(net) await detectPose();
+  if(mario.alive) updateMario();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+/*****************************************************************
+ *  4. 启动
+ *****************************************************************/
+(async ()=>{
+  await initCam();
+  await initPoseNet();
+  gameLoop();
+})();
+</script>
+</body>
+</html>
